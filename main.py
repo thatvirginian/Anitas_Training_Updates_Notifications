@@ -332,6 +332,7 @@ def main():
                 location_guid_trigger = location_guid_trigger,
                 weeks_at_completion   = result.get("weeks"),
                 completion_status     = "completed",
+                completed_at          = result.get("completed_at"),
             )
             new_completions += 1
 

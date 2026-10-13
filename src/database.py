@@ -262,6 +262,90 @@ def get_total_hours(engine, employee_guid: str, job_guid: str) -> float:
         raise
 
 
+def get_completion_shift_out(
+    engine,
+    employee_guid: str,
+    job_guid: str,
+    required_hours: float,
+) -> datetime | None:
+    """
+    Return the out_date of the shift that first pushed cumulative hours
+    over required_hours, ordered by business_date then out_date.
+
+    Used to set completed_at to the real moment the employee finished.
+    Returns None if no such shift is found (shouldn't happen if called
+    after a threshold check passes).
+    """
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                WITH cumulative AS (
+                    SELECT out_date,
+                           SUM(hours) OVER (
+                               ORDER BY business_date, out_date
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                           ) AS running_total
+                    FROM training_time_entries
+                    WHERE employee_guid = :emp
+                      AND job_guid      = :job
+                      AND deleted       = FALSE
+                      AND out_date      IS NOT NULL
+                )
+                SELECT out_date
+                FROM   cumulative
+                WHERE  running_total >= :required
+                ORDER  BY out_date
+                LIMIT  1
+            """), {"emp": employee_guid, "job": job_guid, "required": required_hours}).fetchone()
+        result = row.out_date if row else None
+        logger.debug("get_completion_shift_out  emp=%s  job=%s  out_date=%s",
+                     employee_guid, job_guid, result)
+        return result
+    except Exception as e:
+        logger.error("Failed to get completion shift out emp=%s job=%s: %s",
+                     employee_guid, job_guid, e, exc_info=True)
+        raise
+
+
+def get_last_shift_out_in_week(
+    engine,
+    employee_guid: str,
+    job_guid: str,
+    week_end: object,
+) -> datetime | None:
+    """
+    Return the out_date of the latest shift within the training week
+    that ends on week_end (a date object, inclusive).
+
+    Used to set completed_at for period/pace completions.
+    """
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT MAX(out_date) AS last_out
+                FROM   training_time_entries
+                WHERE  employee_guid = :emp
+                  AND  job_guid      = :job
+                  AND  deleted       = FALSE
+                  AND  business_date <= :week_end
+                  AND  business_date >= :week_start
+                  AND  out_date IS NOT NULL
+            """), {
+                "emp":        employee_guid,
+                "job":        job_guid,
+                "week_end":   week_end,
+                "week_start": week_end - __import__("datetime").timedelta(days=6),
+            }).fetchone()
+        result = row.last_out if row else None
+        logger.debug("get_last_shift_out_in_week  emp=%s  job=%s  week_end=%s  out=%s",
+                     employee_guid, job_guid, week_end, result)
+        return result
+    except Exception as e:
+        logger.error("Failed to get last shift out in week emp=%s job=%s: %s",
+                     employee_guid, job_guid, e, exc_info=True)
+        raise
+
+
 def get_hours_by_week(engine, employee_guid: str, job_guid: str) -> list[dict]:
     """
     Return hours grouped by Wed–Tue training week for an employee+job.
@@ -345,6 +429,7 @@ def save_completion(
     location_guid_trigger: str,
     weeks_at_completion: int | None = None,
     completion_status: str = "completed",
+    completed_at: datetime | None = None,
 ) -> None:
     """
     Insert a training completion row.
@@ -355,6 +440,9 @@ def save_completion(
     completion_status : str
         'completed'  — employee met the training threshold (default)
         'terminated' — employee was deleted in Toast before finishing
+    completed_at : datetime | None
+        The out_date of the shift that triggered completion.
+        Falls back to NOW() if not provided (e.g. terminated employees).
     """
     try:
         with engine.begin() as conn:
@@ -365,23 +453,24 @@ def save_completion(
                     location_guid_trigger, notified_at,
                     completion_status
                 ) VALUES (
-                    :emp, :job, NOW(),
+                    :emp, :job, COALESCE(:completed_at, NOW()),
                     :hours, :weeks,
                     :loc, NULL,
                     :status
                 )
                 ON CONFLICT (employee_guid, job_guid) DO NOTHING
             """), {
-                "emp":    employee_guid,
-                "job":    job_guid,
-                "hours":  hours_at_completion,
-                "weeks":  weeks_at_completion,
-                "loc":    location_guid_trigger,
-                "status": completion_status,
+                "emp":          employee_guid,
+                "job":          job_guid,
+                "completed_at": completed_at,
+                "hours":        hours_at_completion,
+                "weeks":        weeks_at_completion,
+                "loc":          location_guid_trigger,
+                "status":       completion_status,
             })
-        logger.info("Saved completion  emp=%s  job=%s  hours=%.2f  weeks=%s  status=%s",
+        logger.info("Saved completion  emp=%s  job=%s  hours=%.2f  weeks=%s  status=%s  completed_at=%s",
                     employee_guid, job_guid, hours_at_completion,
-                    weeks_at_completion, completion_status)
+                    weeks_at_completion, completion_status, completed_at)
     except Exception as e:
         logger.error("Failed to save completion emp=%s job=%s: %s",
                      employee_guid, job_guid, e, exc_info=True)

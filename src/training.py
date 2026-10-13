@@ -94,14 +94,17 @@ def _check_hours(engine, employee_guid, job_guid, req) -> dict | None:
                  employee_guid, total, required)
 
     if total >= required:
-        reason = f"Reached {total:.1f} hrs (required {required:.0f} hrs)"
-        logger.info("COMPLETE [hours]  emp=%s  job=%s  %s", employee_guid, job_guid, reason)
+        reason       = f"Reached {total:.1f} hrs (required {required:.0f} hrs)"
+        completed_at = db.get_completion_shift_out(engine, employee_guid, job_guid, required)
+        logger.info("COMPLETE [hours]  emp=%s  job=%s  %s  completed_at=%s",
+                    employee_guid, job_guid, reason, completed_at)
         return {
             "employee_guid": employee_guid,
             "job_guid":      job_guid,
             "job_name":      req["job_name"],
             "hours":         total,
             "weeks":         None,
+            "completed_at":  completed_at,
             "reason":        reason,
         }
     return None
@@ -125,32 +128,39 @@ def _check_hours_or_periods(engine, employee_guid, job_guid, req) -> dict | None
 
     # Hours leg
     if total >= required_hours:
-        reason = f"Reached {total:.1f} hrs (required {required_hours:.0f} hrs)"
-        logger.info("COMPLETE [hours_or_periods/hours]  emp=%s  job=%s  %s",
-                    employee_guid, job_guid, reason)
+        reason       = f"Reached {total:.1f} hrs (required {required_hours:.0f} hrs)"
+        completed_at = db.get_completion_shift_out(engine, employee_guid, job_guid, required_hours)
+        logger.info("COMPLETE [hours_or_periods/hours]  emp=%s  job=%s  %s  completed_at=%s",
+                    employee_guid, job_guid, reason, completed_at)
         return {
             "employee_guid": employee_guid,
             "job_guid":      job_guid,
             "job_name":      req["job_name"],
             "hours":         total,
             "weeks":         closed_count,
+            "completed_at":  completed_at,
             "reason":        reason,
         }
 
     # Periods leg
     if closed_count >= required_periods:
-        reason = (
+        reason       = (
             f"Completed {closed_count} full training week(s) "
             f"(required {required_periods}) with {total:.1f} total hrs"
         )
-        logger.info("COMPLETE [hours_or_periods/periods]  emp=%s  job=%s  %s",
-                    employee_guid, job_guid, reason)
+        last_week    = closed_weeks_with_hours[-1]
+        completed_at = db.get_last_shift_out_in_week(
+            engine, employee_guid, job_guid, last_week["week_end"]
+        )
+        logger.info("COMPLETE [hours_or_periods/periods]  emp=%s  job=%s  %s  completed_at=%s",
+                    employee_guid, job_guid, reason, completed_at)
         return {
             "employee_guid": employee_guid,
             "job_guid":      job_guid,
             "job_name":      req["job_name"],
             "hours":         total,
             "weeks":         closed_count,
+            "completed_at":  completed_at,
             "reason":        reason,
         }
 
@@ -186,19 +196,24 @@ def _check_weekly_pace(engine, employee_guid, job_guid, req) -> dict | None:
     )
 
     if closed_count >= required_weeks:
-        pace_label = "full-time pace" if avg_weekly >= pace_threshold else "part-time pace"
-        reason = (
+        pace_label   = "full-time pace" if avg_weekly >= pace_threshold else "part-time pace"
+        reason       = (
             f"Completed {closed_count} full training week(s) at {pace_label} "
             f"(avg {avg_weekly:.1f} hrs/wk, required {required_weeks} weeks)"
         )
-        logger.info("COMPLETE [weekly_pace]  emp=%s  job=%s  %s",
-                    employee_guid, job_guid, reason)
+        last_week    = closed_weeks[-1]
+        completed_at = db.get_last_shift_out_in_week(
+            engine, employee_guid, job_guid, last_week["week_end"]
+        )
+        logger.info("COMPLETE [weekly_pace]  emp=%s  job=%s  %s  completed_at=%s",
+                    employee_guid, job_guid, reason, completed_at)
         return {
             "employee_guid": employee_guid,
             "job_guid":      job_guid,
             "job_name":      req["job_name"],
             "hours":         total_hours,
             "weeks":         closed_count,
+            "completed_at":  completed_at,
             "reason":        reason,
         }
 
@@ -282,11 +297,12 @@ def process_entries(
         if result:
             db.save_completion(
                 engine,
-                employee_guid=employee_guid,
-                job_guid=job_guid,
-                hours_at_completion=result["hours"],
-                location_guid_trigger=location_guid,
-                weeks_at_completion=result.get("weeks"),
+                employee_guid         = employee_guid,
+                job_guid              = job_guid,
+                hours_at_completion   = result["hours"],
+                location_guid_trigger = location_guid,
+                weeks_at_completion   = result.get("weeks"),
+                completed_at          = result.get("completed_at"),
             )
             new_completions.append(result)
 
