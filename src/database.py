@@ -380,7 +380,8 @@ def get_hours_by_week(engine, employee_guid: str, job_guid: str) -> list[dict]:
                 ORDER BY week_start
             """), {"emp": employee_guid, "job": job_guid}).fetchall()
 
-        today = datetime.now(timezone.utc).date()
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         result = [
             {
                 "week_start": r.week_start,
