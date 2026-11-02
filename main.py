@@ -338,6 +338,15 @@ def main():
 
     logger.info("Calculate complete — %d new completion(s)", new_completions)
 
+    # ── Termination sweep ─────────────────────────────────────────────────
+    # Covers ALL in-progress trainees, not just those touched this run, so an
+    # employee terminated without another shift is still closed out.
+    try:
+        swept = training.close_out_terminated(engine, labor)
+        logger.info("Termination sweep — %d employee+job pair(s) closed out", swept)
+    except Exception as e:
+        logger.error("Termination sweep failed: %s", e, exc_info=True)
+
     # ------------------------------------------------------------------
     # 6. NOTIFY — send Teams messages for all pending completions
     # ------------------------------------------------------------------

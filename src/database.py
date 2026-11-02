@@ -188,11 +188,13 @@ def upsert_time_entry(engine, entry: dict, location_guid: str) -> bool:
                     :modified_date, :deleted, NOW()
                 )
                 ON CONFLICT (toast_guid) DO UPDATE SET
+                    in_date       = EXCLUDED.in_date,
+                    out_date      = EXCLUDED.out_date,
                     hours         = EXCLUDED.hours,
                     modified_date = EXCLUDED.modified_date,
                     deleted       = EXCLUDED.deleted,
                     upserted_at   = NOW()
-                WHERE training_time_entries.modified_date < EXCLUDED.modified_date
+                WHERE training_time_entries.modified_date <= EXCLUDED.modified_date
             """), {
                 "toast_guid":    toast_guid,
                 "location_guid": location_guid,
@@ -346,6 +348,63 @@ def get_last_shift_out_in_week(
         raise
 
 
+def get_open_training_pairs(engine) -> list[dict]:
+    """
+    Return every employee+job pair that has training hours but no
+    training_completions row yet (i.e. still "in progress").
+
+    Used by the termination sweep, which must look at everyone still in
+    progress, not just employees whose shifts were pulled this run.
+
+    Each row: { employee_guid, job_guid, location_guid, total_hours, last_out }
+    location_guid is the location of the pair's most recent shift.
+    """
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                WITH pairs AS (
+                    SELECT employee_guid, job_guid,
+                           SUM(hours)    AS total_hours,
+                           MAX(out_date) AS last_out
+                    FROM   training_time_entries
+                    WHERE  deleted = FALSE
+                    GROUP  BY employee_guid, job_guid
+                )
+                SELECT p.employee_guid::text AS employee_guid,
+                       p.job_guid::text      AS job_guid,
+                       p.total_hours,
+                       p.last_out,
+                       (SELECT t.location_guid::text
+                          FROM training_time_entries t
+                         WHERE t.employee_guid = p.employee_guid
+                           AND t.job_guid      = p.job_guid
+                           AND t.deleted       = FALSE
+                         ORDER BY t.out_date DESC
+                         LIMIT 1) AS location_guid
+                FROM   pairs p
+                WHERE  NOT EXISTS (
+                    SELECT 1 FROM training_completions c
+                     WHERE c.employee_guid = p.employee_guid
+                       AND c.job_guid      = p.job_guid
+                )
+            """)).fetchall()
+        pairs = [
+            {
+                "employee_guid": r.employee_guid,
+                "job_guid":      r.job_guid,
+                "location_guid": r.location_guid,
+                "total_hours":   float(r.total_hours),
+                "last_out":      r.last_out,
+            }
+            for r in rows
+        ]
+        logger.debug("get_open_training_pairs  count=%d", len(pairs))
+        return pairs
+    except Exception as e:
+        logger.error("Failed to get open training pairs: %s", e, exc_info=True)
+        raise
+
+
 def get_hours_by_week(engine, employee_guid: str, job_guid: str) -> list[dict]:
     """
     Return hours grouped by Wed–Tue training week for an employee+job.
@@ -380,8 +439,9 @@ def get_hours_by_week(engine, employee_guid: str, job_guid: str) -> list[dict]:
                 ORDER BY week_start
             """), {"emp": employee_guid, "job": job_guid}).fetchall()
 
-        from zoneinfo import ZoneInfo
-        today = datetime.now(ZoneInfo("America/New_York")).date()
+        today = datetime.now(timezone.utc).astimezone(
+            __import__("zoneinfo").ZoneInfo("America/New_York")
+        ).date()
         result = [
             {
                 "week_start": r.week_start,

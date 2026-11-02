@@ -221,6 +221,65 @@ def _check_weekly_pace(engine, employee_guid, job_guid, req) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Termination sweep
+# ---------------------------------------------------------------------------
+
+def close_out_terminated(engine, labor_api) -> int:
+    """
+    Check every in-progress trainee against Toast and close out anyone who has
+    been deleted (terminated) with completion_status = 'terminated'.
+
+    Unlike the per-run completion check, this covers ALL in-progress pairs,
+    not just employees whose shifts were pulled this run — so someone who is
+    terminated and never works another shift is still caught.
+
+    Each employee is looked up once (individual get_employee endpoint) and the
+    result is reused for all of their jobs. A failed lookup is skipped, never
+    treated as terminated.
+
+    completed_at is the employee's last training shift out_date.
+    No Teams notification is sent for terminated rows.
+
+    Returns the number of pairs closed out.
+    """
+    pairs = db.get_open_training_pairs(engine)
+    if not pairs:
+        return 0
+
+    deleted_cache: dict[str, bool | None] = {}   # None = lookup failed
+    closed = 0
+
+    for p in pairs:
+        emp_guid = p["employee_guid"]
+
+        if emp_guid not in deleted_cache:
+            try:
+                emp = labor_api.get_employee(p["location_guid"], emp_guid)
+                deleted_cache[emp_guid] = bool(emp.get("deleted")) if emp else None
+            except Exception as e:
+                logger.warning("Termination check failed  emp=%s: %s", emp_guid, e)
+                deleted_cache[emp_guid] = None
+
+        if not deleted_cache[emp_guid]:
+            continue
+
+        db.save_completion(
+            engine,
+            employee_guid         = emp_guid,
+            job_guid              = p["job_guid"],
+            hours_at_completion   = p["total_hours"],
+            location_guid_trigger = p["location_guid"],
+            completion_status     = "terminated",
+            completed_at          = p["last_out"],
+        )
+        logger.info("Closed out terminated employee  emp=%s  job=%s  hours=%.2f",
+                    emp_guid, p["job_guid"], p["total_hours"])
+        closed += 1
+
+    return closed
+
+
+# ---------------------------------------------------------------------------
 # Process a batch of time entries for one location
 # ---------------------------------------------------------------------------
 
